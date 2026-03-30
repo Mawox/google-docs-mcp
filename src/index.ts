@@ -79,6 +79,7 @@ const server = new FastMCP({
         'https://www.googleapis.com/auth/script.external_request',
       ],
       ...(process.env.JWT_SIGNING_KEY && { jwtSigningKey: process.env.JWT_SIGNING_KEY }),
+      ...(process.env.TOKEN_ENCRYPTION_KEY && { encryptionKey: process.env.TOKEN_ENCRYPTION_KEY }),
       ...(process.env.REFRESH_TOKEN_TTL && {
         refreshTokenTtl: parseInt(process.env.REFRESH_TOKEN_TTL),
       }),
