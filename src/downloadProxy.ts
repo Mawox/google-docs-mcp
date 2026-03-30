@@ -1,4 +1,5 @@
 import crypto from 'node:crypto';
+import { Readable } from 'node:stream';
 import { stream } from 'hono/streaming';
 import { google } from 'googleapis';
 import { OAuth2Client } from 'google-auth-library';
@@ -52,8 +53,9 @@ export function registerDownloadRoute(server: FastMCP): void {
         { fileId: entry.fileId, mimeType: entry.exportMime },
         { responseType: 'stream' }
       );
+      const webStream = Readable.toWeb(res.data as Readable) as ReadableStream;
       return stream(c, async (s) => {
-        await s.pipe(res.data as any);
+        await s.pipe(webStream);
       });
     } else {
       c.header('Content-Type', entry.mimeType);
@@ -61,8 +63,9 @@ export function registerDownloadRoute(server: FastMCP): void {
         { fileId: entry.fileId, alt: 'media', supportsAllDrives: true },
         { responseType: 'stream' }
       );
+      const webStream = Readable.toWeb(res.data as Readable) as ReadableStream;
       return stream(c, async (s) => {
-        await s.pipe(res.data as any);
+        await s.pipe(webStream);
       });
     }
   });
