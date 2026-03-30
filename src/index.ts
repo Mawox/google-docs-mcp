@@ -23,6 +23,7 @@ import { initializeGoogleClient } from './clients.js';
 import { registerAllTools } from './tools/index.js';
 import { wrapServerForRemote } from './remoteWrapper.js';
 import { registerLandingPage } from './landingPage.js';
+import { registerDownloadRoute } from './downloadProxy.js';
 import { FirestoreTokenStorage } from './firestoreTokenStorage.js';
 import { logger } from './logger.js';
 
@@ -99,6 +100,7 @@ try {
   if (isRemote) {
     logger.info('Starting in remote mode (httpStream + MCP OAuth 2.1)...');
     registerLandingPage(server, registeredTools.length);
+    registerDownloadRoute(server);
 
     const port = parseInt(process.env.PORT || '8080');
     await server.start({

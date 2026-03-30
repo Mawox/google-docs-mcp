@@ -5,6 +5,10 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { pipeline } from 'node:stream/promises';
 import { getDriveClient } from '../../clients.js';
+import { requestClients } from '../../remoteWrapper.js';
+import { createDownloadToken } from '../../downloadProxy.js';
+
+const isRemote = process.env.MCP_TRANSPORT === 'httpStream';
 
 export const WORKSPACE_EXPORT_DEFAULTS: Record<string, string> = {
   'application/vnd.google-apps.document': 'text/markdown',
@@ -93,9 +97,7 @@ export function register(server: FastMCP) {
       const drive = await getDriveClient();
       log.info(`Downloading file ${args.fileId}${args.savePath ? ` to ${args.savePath}` : ''}`);
 
-      let resolvedSavePath = args.savePath;
-      if (resolvedSavePath) resolvedSavePath = ensureWithinCwd(resolvedSavePath);
-
+      let resolvedSavePath: string | undefined;
       try {
         // 1. Get file metadata
         const metadataRes = await drive.files.get({
@@ -121,7 +123,64 @@ export function register(server: FastMCP) {
           }
         }
 
-        // 3. Resolve savePath
+        // ---------- Remote mode: return download URL + text content ----------
+        if (isRemote) {
+          const store = requestClients.getStore();
+          if (!store) throw new UserError('Request context missing.');
+
+          const resolvedFileName =
+            isWorkspace && exportMime
+              ? path.parse(fileName).name + (EXPORT_MIME_TO_EXTENSION[exportMime] || '')
+              : fileName;
+
+          const token = createDownloadToken({
+            fileId: args.fileId,
+            accessToken: store.accessToken,
+            exportMime,
+            fileName: resolvedFileName,
+            mimeType: exportMime || originalMimeType,
+            isWorkspace,
+          });
+
+          const downloadUrl = `${process.env.BASE_URL}/download/${token}`;
+          const outputMime = exportMime || originalMimeType;
+
+          const result: Record<string, unknown> = {
+            downloadUrl,
+            fileName: resolvedFileName,
+            originalMimeType,
+          };
+          if (isWorkspace && exportMime) result.exportedAs = exportMime;
+
+          if (args.extractText !== false && isTextMimeType(outputMime)) {
+            try {
+              let textData: string;
+              if (isWorkspace && exportMime) {
+                const res = await drive.files.export(
+                  { fileId: args.fileId, mimeType: exportMime },
+                  { responseType: 'text' }
+                );
+                textData = res.data as string;
+              } else {
+                const res = await drive.files.get(
+                  { fileId: args.fileId, alt: 'media', supportsAllDrives: true },
+                  { responseType: 'text' }
+                );
+                textData = res.data as string;
+              }
+              result.textContent = textData.slice(0, MAX_TEXT_EXTRACT_BYTES);
+            } catch {
+              log.warn?.('Could not extract text content');
+            }
+          }
+
+          return JSON.stringify(result, null, 2);
+        }
+
+        // ---------- Stdio mode: write to local disk ----------
+        resolvedSavePath = args.savePath;
+        if (resolvedSavePath) resolvedSavePath = ensureWithinCwd(resolvedSavePath);
+
         if (!resolvedSavePath) {
           if (isWorkspace && exportMime) {
             const baseName = path.parse(fileName).name;
@@ -133,10 +192,8 @@ export function register(server: FastMCP) {
         }
         resolvedSavePath = ensureWithinCwd(resolvedSavePath);
 
-        // 4. Ensure parent directories exist
         fs.mkdirSync(path.dirname(resolvedSavePath), { recursive: true });
 
-        // 5. Download or export
         let outputMime: string;
         if (isWorkspace && exportMime) {
           log.info(`Exporting Workspace file as ${exportMime}`);
@@ -156,10 +213,8 @@ export function register(server: FastMCP) {
           outputMime = originalMimeType;
         }
 
-        // 6. Get file size
         const sizeBytes = fs.statSync(resolvedSavePath).size;
 
-        // 7. Text extraction
         let textContent: string | undefined;
         if (args.extractText !== false && isTextMimeType(outputMime)) {
           try {
@@ -170,31 +225,24 @@ export function register(server: FastMCP) {
           }
         }
 
-        // 8. Build response
         const result: Record<string, unknown> = {
           savedTo: resolvedSavePath,
           fileName,
           originalMimeType,
           sizeBytes,
         };
-        if (isWorkspace && exportMime) {
-          result.exportedAs = exportMime;
-        }
-        if (textContent !== undefined) {
-          result.textContent = textContent;
-        }
+        if (isWorkspace && exportMime) result.exportedAs = exportMime;
+        if (textContent !== undefined) result.textContent = textContent;
 
         return JSON.stringify(result, null, 2);
       } catch (error: any) {
-        // Clean up partial file on error
-        if (resolvedSavePath) {
+        if (!isRemote && resolvedSavePath) {
           try {
             fs.unlinkSync(resolvedSavePath);
           } catch {
-            // File may not exist yet, ignore
+            /* file may not exist yet */
           }
         }
-
         log.error(`Error downloading file ${args.fileId}: ${error.message || error}`);
         if (error instanceof UserError) throw error;
         if (error.code === 404)

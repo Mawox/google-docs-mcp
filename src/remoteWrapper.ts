@@ -11,6 +11,7 @@ function hashToken(token: string): string {
 }
 
 export interface RequestClients {
+  accessToken: string;
   auth: OAuth2Client;
   docs: docs_v1.Docs;
   sheets: sheets_v4.Sheets;
@@ -47,6 +48,7 @@ function createClients(accessToken: string): RequestClients {
   const auth = new OAuth2Client();
   auth.setCredentials({ access_token: accessToken });
   return {
+    accessToken,
     auth,
     docs: google.docs({ version: 'v1', auth }),
     sheets: google.sheets({ version: 'v4', auth }),
