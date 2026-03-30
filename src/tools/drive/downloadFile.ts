@@ -1,12 +1,10 @@
 import type { FastMCP } from 'fastmcp';
-import { UserError } from 'fastmcp';
+import { UserError, imageContent } from 'fastmcp';
 import { z } from 'zod';
 import fs from 'node:fs';
 import path from 'node:path';
 import { pipeline } from 'node:stream/promises';
 import { getDriveClient } from '../../clients.js';
-import { requestClients } from '../../remoteWrapper.js';
-import { createDownloadToken } from '../../downloadProxy.js';
 
 const isRemote = process.env.MCP_TRANSPORT === 'httpStream';
 
@@ -123,58 +121,68 @@ export function register(server: FastMCP) {
           }
         }
 
-        // ---------- Remote mode: return download URL + text content ----------
+        // ---------- Remote mode: return content inline via MCP ----------
         if (isRemote) {
-          const store = requestClients.getStore();
-          if (!store) throw new UserError('Request context missing.');
-
           const resolvedFileName =
             isWorkspace && exportMime
               ? path.parse(fileName).name + (EXPORT_MIME_TO_EXTENSION[exportMime] || '')
               : fileName;
 
-          const token = createDownloadToken({
-            fileId: args.fileId,
-            accessToken: store.accessToken,
-            exportMime,
-            fileName: resolvedFileName,
-            mimeType: exportMime || originalMimeType,
-            isWorkspace,
-          });
-
-          const downloadUrl = `${process.env.BASE_URL}/download/${token}`;
-          const outputMime = exportMime || originalMimeType;
-
-          const result: Record<string, unknown> = {
-            downloadUrl,
-            fileName: resolvedFileName,
-            originalMimeType,
-          };
-          if (isWorkspace && exportMime) result.exportedAs = exportMime;
-
-          if (args.extractText !== false && isTextMimeType(outputMime)) {
-            try {
-              let textData: string;
-              if (isWorkspace && exportMime) {
-                const res = await drive.files.export(
-                  { fileId: args.fileId, mimeType: exportMime },
-                  { responseType: 'text' }
-                );
-                textData = res.data as string;
-              } else {
-                const res = await drive.files.get(
-                  { fileId: args.fileId, alt: 'media', supportsAllDrives: true },
-                  { responseType: 'text' }
-                );
-                textData = res.data as string;
-              }
-              result.textContent = textData.slice(0, MAX_TEXT_EXTRACT_BYTES);
-            } catch {
-              log.warn?.('Could not extract text content');
-            }
+          let fileBuffer: Buffer;
+          let outputMime: string;
+          if (isWorkspace && exportMime) {
+            log.info(`Exporting Workspace file as ${exportMime}`);
+            const res = await drive.files.export(
+              { fileId: args.fileId, mimeType: exportMime },
+              { responseType: 'arraybuffer' }
+            );
+            fileBuffer = Buffer.from(res.data as ArrayBuffer);
+            outputMime = exportMime;
+          } else {
+            log.info('Downloading blob file into memory');
+            const res = await drive.files.get(
+              { fileId: args.fileId, alt: 'media', supportsAllDrives: true },
+              { responseType: 'arraybuffer' }
+            );
+            fileBuffer = Buffer.from(res.data as ArrayBuffer);
+            outputMime = originalMimeType;
           }
 
-          return JSON.stringify(result, null, 2);
+          const MAX_INLINE_BYTES = 100 * 1024 * 1024;
+          const content: any[] = [];
+
+          if (isTextMimeType(outputMime)) {
+            content.push({
+              type: 'text' as const,
+              text: fileBuffer.toString('utf-8').slice(0, MAX_TEXT_EXTRACT_BYTES),
+            });
+          } else if (outputMime.startsWith('image/') && fileBuffer.length <= MAX_INLINE_BYTES) {
+            content.push(await imageContent({ buffer: fileBuffer }));
+          } else if (fileBuffer.length <= MAX_INLINE_BYTES) {
+            content.push({
+              type: 'resource' as const,
+              resource: {
+                uri: `gdrive:///${args.fileId}/${resolvedFileName}`,
+                blob: fileBuffer.toString('base64'),
+                mimeType: outputMime,
+              },
+            });
+          } else {
+            throw new UserError(
+              `File too large for inline transfer (${(fileBuffer.length / 1024 / 1024).toFixed(1)}MB, limit 100MB).`
+            );
+          }
+
+          content.push({
+            type: 'text' as const,
+            text: JSON.stringify({
+              fileName: resolvedFileName,
+              originalMimeType,
+              sizeBytes: fileBuffer.length,
+            }),
+          });
+
+          return { content };
         }
 
         // ---------- Stdio mode: write to local disk ----------
