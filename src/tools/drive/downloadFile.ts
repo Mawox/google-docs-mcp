@@ -5,6 +5,8 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { pipeline } from 'node:stream/promises';
 import { getDriveClient } from '../../clients.js';
+import { requestClients } from '../../remoteWrapper.js';
+import { createDownloadToken } from '../../downloadProxy.js';
 
 const isRemote = process.env.MCP_TRANSPORT === 'httpStream';
 
@@ -79,6 +81,15 @@ const DownloadFileParameters = z.object({
       'If true, return text content in the response (up to 50KB) alongside saving the file. ' +
         'Works for text/*, application/json. For binary files, only the save path is returned.'
     ),
+  returnAs: z
+    .enum(['url', 'content'])
+    .optional()
+    .default('url')
+    .describe(
+      'Remote mode only. ' +
+        '"url" (default): returns a short-lived download URL -- use curl -o to save to disk. ' +
+        '"content": returns file content inline (text, image, or base64 resource).'
+    ),
 });
 
 export function register(server: FastMCP) {
@@ -121,15 +132,58 @@ export function register(server: FastMCP) {
           }
         }
 
-        // ---------- Remote mode: return content inline via MCP ----------
+        // ---------- Remote mode ----------
         if (isRemote) {
           const resolvedFileName =
             isWorkspace && exportMime
               ? path.parse(fileName).name + (EXPORT_MIME_TO_EXTENSION[exportMime] || '')
               : fileName;
+          const outputMime = exportMime || originalMimeType;
 
+          // --- returnAs: "url" (default) -- agent uses curl to save to disk ---
+          if (args.returnAs !== 'content') {
+            const store = requestClients.getStore();
+            if (!store) throw new UserError('Request context missing.');
+
+            const token = createDownloadToken({
+              fileId: args.fileId,
+              accessToken: store.accessToken,
+              exportMime,
+              fileName: resolvedFileName,
+              mimeType: outputMime,
+              isWorkspace,
+            });
+
+            const result: Record<string, unknown> = {
+              downloadUrl: `${process.env.BASE_URL}/download/${token}`,
+              fileName: resolvedFileName,
+              originalMimeType,
+            };
+            if (isWorkspace && exportMime) result.exportedAs = exportMime;
+
+            if (args.extractText !== false && isTextMimeType(outputMime)) {
+              try {
+                const textRes =
+                  isWorkspace && exportMime
+                    ? await drive.files.export(
+                        { fileId: args.fileId, mimeType: exportMime },
+                        { responseType: 'text' }
+                      )
+                    : await drive.files.get(
+                        { fileId: args.fileId, alt: 'media', supportsAllDrives: true },
+                        { responseType: 'text' }
+                      );
+                result.textContent = (textRes.data as string).slice(0, MAX_TEXT_EXTRACT_BYTES);
+              } catch {
+                log.warn?.('Could not extract text content');
+              }
+            }
+
+            return JSON.stringify(result, null, 2);
+          }
+
+          // --- returnAs: "content" -- inline via MCP content types ---
           let fileBuffer: Buffer;
-          let outputMime: string;
           if (isWorkspace && exportMime) {
             log.info(`Exporting Workspace file as ${exportMime}`);
             const res = await drive.files.export(
@@ -137,7 +191,6 @@ export function register(server: FastMCP) {
               { responseType: 'arraybuffer' }
             );
             fileBuffer = Buffer.from(res.data as ArrayBuffer);
-            outputMime = exportMime;
           } else {
             log.info('Downloading blob file into memory');
             const res = await drive.files.get(
@@ -145,7 +198,6 @@ export function register(server: FastMCP) {
               { responseType: 'arraybuffer' }
             );
             fileBuffer = Buffer.from(res.data as ArrayBuffer);
-            outputMime = originalMimeType;
           }
 
           const MAX_INLINE_BYTES = 100 * 1024 * 1024;
