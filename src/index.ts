@@ -13,7 +13,8 @@
 //   BASE_URL=https://...               Public URL for OAuth redirects
 //   ALLOWED_DOMAINS=scio.cz,...        Restrict to specific Google Workspace domains
 
-import { FastMCP, GoogleProvider } from 'fastmcp';
+import { FastMCP } from 'fastmcp';
+import { OAuthProxy } from 'fastmcp/auth';
 import {
   buildCachedToolsListPayload,
   collectToolsWhileRegistering,
@@ -62,33 +63,58 @@ if (isRemote) {
   }
 }
 
-const server = new FastMCP({
-  name: 'Ultimate Google Docs & Sheets MCP Server',
-  version: '1.0.0',
-  ...(isRemote && {
-    auth: new GoogleProvider({
-      allowedRedirectUriPatterns: ['http://localhost:*', `${process.env.BASE_URL}/*`, 'cursor://*'],
+// #region agent log
+if (isRemote) {
+  console.error(
+    `[DBG-326455] STARTUP jwtKey=${process.env.JWT_SIGNING_KEY ? 'SET(' + process.env.JWT_SIGNING_KEY.slice(0, 8) + '...)' : 'MISSING'} encKey=${process.env.TOKEN_ENCRYPTION_KEY ? 'SET(' + process.env.TOKEN_ENCRYPTION_KEY.slice(0, 8) + '...)' : 'MISSING'} tokenStore=${process.env.TOKEN_STORE || 'default'} project=${process.env.GCLOUD_PROJECT || 'unset'}`
+  );
+}
+// #endregion
+
+const GOOGLE_API_SCOPES = [
+  'openid',
+  'email',
+  'https://www.googleapis.com/auth/documents',
+  'https://www.googleapis.com/auth/spreadsheets',
+  'https://www.googleapis.com/auth/drive',
+  'https://www.googleapis.com/auth/script.external_request',
+];
+
+const oauthProxy = isRemote
+  ? new OAuthProxy({
+      upstreamAuthorizationEndpoint: 'https://accounts.google.com/o/oauth2/v2/auth',
+      upstreamTokenEndpoint: 'https://oauth2.googleapis.com/token',
+      upstreamClientId: process.env.GOOGLE_CLIENT_ID!,
+      upstreamClientSecret: process.env.GOOGLE_CLIENT_SECRET!,
       baseUrl: process.env.BASE_URL!,
-      clientId: process.env.GOOGLE_CLIENT_ID!,
-      clientSecret: process.env.GOOGLE_CLIENT_SECRET!,
-      scopes: [
-        'openid',
-        'email',
-        'https://www.googleapis.com/auth/documents',
-        'https://www.googleapis.com/auth/spreadsheets',
-        'https://www.googleapis.com/auth/drive',
-        'https://www.googleapis.com/auth/script.external_request',
-      ],
-      ...(process.env.JWT_SIGNING_KEY && { jwtSigningKey: process.env.JWT_SIGNING_KEY }),
-      ...(process.env.TOKEN_ENCRYPTION_KEY && { encryptionKey: process.env.TOKEN_ENCRYPTION_KEY }),
-      ...(process.env.REFRESH_TOKEN_TTL && {
-        refreshTokenTtl: parseInt(process.env.REFRESH_TOKEN_TTL),
-      }),
+      scopes: GOOGLE_API_SCOPES,
+      allowedRedirectUriPatterns: ['http://localhost:*', `${process.env.BASE_URL}/*`, 'cursor://*'],
+      jwtSigningKey: process.env.JWT_SIGNING_KEY,
+      encryptionKey: process.env.TOKEN_ENCRYPTION_KEY,
+      accessTokenTtl: 2592000,
+      refreshTokenTtl: 2592000,
       ...(process.env.TOKEN_STORE === 'firestore' && {
         tokenStorage: new FirestoreTokenStorage(process.env.GCLOUD_PROJECT),
       }),
+    })
+  : undefined;
+
+const server = new FastMCP({
+  name: 'Ultimate Google Docs & Sheets MCP Server',
+  version: '1.0.0',
+  ...(isRemote &&
+    oauthProxy && {
+      oauth: {
+        enabled: true,
+        authorizationServer: oauthProxy.getAuthorizationServerMetadata(),
+        protectedResource: {
+          authorizationServers: [process.env.BASE_URL!],
+          resource: process.env.BASE_URL!,
+          scopesSupported: GOOGLE_API_SCOPES,
+        },
+        proxy: oauthProxy,
+      },
     }),
-  }),
 });
 
 const registeredTools: Parameters<FastMCP['addTool']>[0][] = [];

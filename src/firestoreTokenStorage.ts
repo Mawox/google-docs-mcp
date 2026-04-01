@@ -15,20 +15,59 @@ export class FirestoreTokenStorage implements TokenStorage {
     this.db = new Firestore({ projectId });
   }
 
+  // #region agent log
   async save(key: string, value: unknown, _ttl?: number): Promise<void> {
-    const doc = this.db.collection(COLLECTION).doc(encodeKey(key));
-    await doc.set({ value, createdAt: Date.now() });
+    const encodedKey = encodeKey(key);
+    const valueType = typeof value === 'string' ? `string(${value.length})` : typeof value;
+    try {
+      const doc = this.db.collection(COLLECTION).doc(encodedKey);
+      await doc.set({ value, createdAt: Date.now() });
+      console.error(
+        `[DBG-326455] SAVE key=${key.slice(0, 40)} encoded=${encodedKey.slice(0, 40)} valueType=${valueType} OK`
+      );
+    } catch (err: any) {
+      console.error(`[DBG-326455] SAVE key=${key.slice(0, 40)} FAILED: ${err.message}`);
+      throw err;
+    }
   }
+  // #endregion
 
+  // #region agent log
   async get(key: string): Promise<unknown | null> {
-    const doc = await this.db.collection(COLLECTION).doc(encodeKey(key)).get();
-    if (!doc.exists) return null;
-    return doc.data()!.value;
+    const encodedKey = encodeKey(key);
+    try {
+      const doc = await this.db.collection(COLLECTION).doc(encodedKey).get();
+      if (!doc.exists) {
+        console.error(
+          `[DBG-326455] GET key=${key.slice(0, 40)} encoded=${encodedKey.slice(0, 40)} NOT_FOUND`
+        );
+        return null;
+      }
+      const data = doc.data()!;
+      const val = data.value;
+      const valType = typeof val === 'string' ? `string(${val.length})` : typeof val;
+      console.error(
+        `[DBG-326455] GET key=${key.slice(0, 40)} encoded=${encodedKey.slice(0, 40)} FOUND valueType=${valType}`
+      );
+      return val;
+    } catch (err: any) {
+      console.error(`[DBG-326455] GET key=${key.slice(0, 40)} ERROR: ${err.message}`);
+      throw err;
+    }
   }
+  // #endregion
 
+  // #region agent log
   async delete(key: string): Promise<void> {
-    await this.db.collection(COLLECTION).doc(encodeKey(key)).delete();
+    try {
+      await this.db.collection(COLLECTION).doc(encodeKey(key)).delete();
+      console.error(`[DBG-326455] DELETE key=${key.slice(0, 40)} OK`);
+    } catch (err: any) {
+      console.error(`[DBG-326455] DELETE key=${key.slice(0, 40)} FAILED: ${err.message}`);
+      throw err;
+    }
   }
+  // #endregion
 
   async cleanup(): Promise<void> {
     // FastMCP handles token expiry internally via delete() calls.
